@@ -10,6 +10,9 @@
 //|  - the caller (SlotRiskManager.mq5) sends only after the trader   |
 //|    enabled trading twice (EA input + panel switch) and confirmed  |
 //|    twice (panel + Windows dialog), within the daily loss limit    |
+//|    and the v2 rules                                               |
+//|  - 2.20: a pending order may carry an expiry (end of the v2      |
+//|    trading window) when the broker allows it; otherwise GTC      |
 //+------------------------------------------------------------------+
 
 // one planned order
@@ -22,6 +25,7 @@ struct RmOrder
    double   sl;
    double   tp;         // 0 = no take-profit
    double   lot;
+   datetime expire;     // pending orders: expiry time (0 = good till cancelled)
    string   why;        // reason when not ok
   };
 
@@ -39,6 +43,12 @@ string RmTypeName(const ENUM_ORDER_TYPE t)
      }
   }
 
+// the broker accepts an expiry time on pending orders of this symbol
+bool RmCanExpire(const string sym)
+  {
+   return (SymbolInfoInteger(sym, SYMBOL_EXPIRATION_MODE) & SYMBOL_EXPIRATION_SPECIFIED) == SYMBOL_EXPIRATION_SPECIFIED;
+  }
+
 double RmTickRound(const string sym, const double p)
   {
    double ts = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
@@ -51,11 +61,11 @@ double RmTickRound(const string sym, const double p)
 // market order at the live price, or a pending order at `entry` (limit when the entry is better than the live price,
 // stop when it is worse). The stop must be on the losing side and at least the broker's stop level away.
 RmOrder RmBuildOrder(const string sym, const bool buy, const bool market, const double entry, const double sl,
-                     const double tp, const double lot)
+                     const double tp, const double lot, const datetime expire = 0)
   {
    RmOrder o;
    o.ok = false; o.market = market; o.type = buy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   o.price = 0; o.sl = 0; o.tp = 0; o.lot = lot; o.why = "";
+   o.price = 0; o.sl = 0; o.tp = 0; o.lot = lot; o.why = ""; o.expire = 0;
    double bid = SymbolInfoDouble(sym, SYMBOL_BID), ask = SymbolInfoDouble(sym, SYMBOL_ASK);
    double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
    double lvl = (double)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL) * pt;
@@ -107,6 +117,8 @@ RmOrder RmBuildOrder(const string sym, const bool buy, const bool market, const 
       o.why = "the take-profit is on the wrong side of the entry";
       return o;
      }
+   if(!market && expire > TimeTradeServer() && RmCanExpire(sym))
+      o.expire = expire;
    o.ok = true;
    return o;
   }
@@ -151,6 +163,11 @@ bool RmSendOrder(const string sym, const RmOrder &o, const long magic, const str
    rq.comment = StringSubstr(comment, 0, 31);
    rq.type_filling = RmFilling(sym, o.market);
    rq.type_time = ORDER_TIME_GTC;
+   if(!o.market && o.expire > 0)
+     {
+      rq.type_time = ORDER_TIME_SPECIFIED;   // the pending order is removed by the server at the end of the window
+      rq.expiration = o.expire;
+     }
    if(!OrderCheck(rq, ck))
      {
       msg = "check failed: " + ck.comment + " (" + IntegerToString(ck.retcode) + ")";
